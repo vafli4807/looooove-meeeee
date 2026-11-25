@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>А снег идёт</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500;1,600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100vw; height: 100vh; height: 100dvh;
+    overflow: hidden; background: #8e959b;
+    user-select: none; -webkit-user-select: none;
+    cursor: pointer;
+  }
+  body { display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #a9afb5 0%, #7d848a 100%); }
+  /* вертикальная сцена 9:16, по центру экрана */
+  #stage {
+    position: relative; overflow: hidden;
+    width: min(100vw, calc(100dvh * 16 / 9));
+    height: min(100dvh, calc(100vw * 9 / 16));
+    container-type: size;
+    box-shadow: 0 0 80px rgba(0,0,0,0.35);
+  }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #bg { z-index: 1; }
+  #snow { z-index: 2; pointer-events: none; }
+
+  #lyricsWrap {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none; padding: 0 8%;
+  }
+  /* мягкая подложка, почти сливающаяся с фоном */
+  #lyricsBox {
+    width: 100%;
+    padding: 2cqw 3cqw;
+    background: transparent;
+    text-align: center;
+  }
+  #lyric {
+    font-family: 'Cormorant Garamond', 'Playfair Display', Georgia, serif;
+    font-style: italic; font-weight: 600;
+    font-size: 4vw;
+    font-size: clamp(1.4rem, 4.6cqw, 4rem);
+    line-height: 1.25; letter-spacing: 0.01em;
+    color: #fff;
+    text-shadow: 0 2px 4px rgba(30, 36, 42, 0.55), 0 0 18px rgba(30, 36, 42, 0.6), 0 0 40px rgba(30, 36, 42, 0.35);
+    opacity: 0; transform: translateY(16px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+    min-height: 1.25em;
+  }
+  #lyric.in  { opacity: 1; transform: translateY(0); }
+  #lyric.out { opacity: 0; transform: translateY(-16px); transition-duration: 0.45s; }
+
+  #soundBtn {
+    position: absolute; top: max(14px, env(safe-area-inset-top)); right: 14px;
+    z-index: 5; width: 46px; height: 46px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.28);
+    background: rgba(20, 24, 28, 0.35);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; opacity: 0.7; transition: opacity .25s, background .25s, transform .2s;
+  }
+  #soundBtn:hover { opacity: 1; background: rgba(20, 24, 28, 0.55); transform: scale(1.06); }
+  #soundBtn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #soundBtn .off { display: none; }
+  #soundBtn.muted .on { display: none; }
+  #soundBtn.muted .off { display: block; }
+</style>
+</head>
+<body>
+<audio id="bgMusic" src="song.mp3" loop preload="auto"></audio>
+
+<div id="stage">
+  <canvas id="bg"></canvas>
+  <canvas id="snow"></canvas>
+
+  <div id="lyricsWrap"><div id="lyricsBox"><div id="lyric"></div></div></div>
+
+  <button id="soundBtn" class="muted" aria-label="Включить / выключить музыку" title="Музыка">
+    <svg class="on" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a8 8 0 0 1 0 11"/></svg>
+    <svg class="off" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4z"/><path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/></svg>
+  </button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ---------- Утилиты ---------- */
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  const bg = document.getElementById('bg');
+  const snow = document.getElementById('snow');
+  const bgCtx = bg.getContext('2d');
+  const snCtx = snow.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  /* ---------- Сцена леса (рисуется в высоком разрешении, затем мозаика) ---------- */
+  function drawTree(c, x, by, th, tw, col, snowCol, rnd) {
+    // ствол
+    c.fillStyle = col;
+    c.fillRect(x - tw * 0.04, by - th * 0.08, tw * 0.08, th * 0.1);
+    const tiers = 6;
+    for (let i = 0; i < tiers; i++) {
+      const t0 = i / tiers;
+      const yt = by - th + th * 0.82 * t0;
+      const yb = yt + (th * 0.82 / tiers) * 2.1;
+      const hw = tw * (0.22 + 0.78 * (i + 1) / tiers) / 2;
+      const jag = hw * 0.12;
+      c.fillStyle = col;
+      c.beginPath();
+      c.moveTo(x, yt);
+      c.lineTo(x + hw, yb + jag);
+      c.lineTo(x + hw * 0.55, yb - jag * 0.4);
+      c.lineTo(x, yb + jag);
+      c.lineTo(x - hw * 0.55, yb - jag * 0.4);
+      c.lineTo(x - hw, yb + jag);
+      c.closePath();
+      c.fill();
+      // снег на ветвях
+      c.fillStyle = snowCol;
+      c.beginPath();
+      c.moveTo(x, yt);
+      c.lineTo(x - hw * 0.95, yb + jag * 0.6);
+      c.lineTo(x - hw * 0.35, yb - jag * 0.2);
+      c.lineTo(x + hw * 0.1, yt + (yb - yt) * 0.55);
+      c.closePath();
+      c.fill();
+      c.globalAlpha = 0.7;
+      c.beginPath();
+      c.moveTo(x + hw * 0.15, yt + (yb - yt) * 0.65);
+      c.lineTo(x + hw * 0.9, yb + jag * 0.5);
+      c.lineTo(x + hw * 0.5, yb - jag * 0.3);
+      c.closePath();
+      c.fill();
+      c.globalAlpha = 1;
+    }
+  }
+
+  function drawScene(c, w, h) {
+    const rnd = mulberry32(20241);
+
+    // небо
+    let g = c.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#d3d7da');
+    g.addColorStop(0.45, '#c3c8cc');
+    g.addColorStop(1, '#b4babf');
+    c.fillStyle = g; c.fillRect(0, 0, w, h);
+
+    // мягкое светлое пятно тумана у горизонта
+    g = c.createRadialGradient(w * 0.62, h * 0.38, 0, w * 0.62, h * 0.38, w * 0.6);
+    g.addColorStop(0, 'rgba(240,242,244,0.75)');
+    g.addColorStop(1, 'rgba(240,242,244,0)');
+    c.fillStyle = g; c.fillRect(0, 0, w, h);
+
+    function layer(hillFn, hillCol, treeCol, snowCol, hMin, hMax, step, widthK, densityFn, fogAlpha, fogTop) {
+      // холм
+      c.fillStyle = hillCol;
+      c.beginPath(); c.moveTo(0, h);
+      for (let x = 0; x <= w; x += w / 80) c.lineTo(x, hillFn(x));
+      c.lineTo(w, h); c.closePath(); c.fill();
+      // ели
+      for (let x = -step; x < w + step; x += step * (0.6 + rnd() * 0.8)) {
+        if (rnd() > densityFn(x / w)) continue;
+        const th = h * (hMin + rnd() * (hMax - hMin));
+        const by = hillFn(x) + h * 0.012 + rnd() * h * 0.02;
+        drawTree(c, x, by, th, th * widthK, treeCol, snowCol, rnd);
+      }
+      // туман поверх слоя
+      const fg = c.createLinearGradient(0, h * fogTop, 0, h * (fogTop + 0.3));
+      fg.addColorStop(0, `rgba(222,226,229,0)`);
+      fg.addColorStop(0.5, `rgba(222,226,229,${fogAlpha})`);
+      fg.addColorStop(1, `rgba(222,226,229,0)`);
+      c.fillStyle = fg; c.fillRect(0, h * fogTop, w, h * 0.3);
+    }
+
+    // дальний слой
+    layer(x => h * 0.50 + Math.sin(x / w * 3.1 + 1) * h * 0.035 - x / w * h * 0.04,
+      '#d4d8db', '#9ba2a8', '#dfe3e6', 0.09, 0.15, w * 0.012, 0.5, () => 0.95, 0.55, 0.42);
+
+    // средний слой
+    layer(x => h * 0.63 + Math.sin(x / w * 2.4 + 0.3) * h * 0.04 - x / w * h * 0.05,
+      '#e0e3e6', '#656c72', '#e9ecee', 0.17, 0.27, w * 0.03, 0.5, () => 0.9, 0.38, 0.55);
+
+    // ближний слой (холм + крупные ели, больше по краям)
+    const nearHill = x => h * 0.82 + Math.sin(x / w * 2.2 + 0.5) * h * 0.03 - x / w * h * 0.06;
+    layer(nearHill, '#f3f4f5', '#2a2f33', '#d9dde0', 0.34, 0.58, w * 0.075, 0.46,
+      u => 0.28 + 0.7 * Math.pow(Math.abs(u - 0.5) * 2, 1.4), 0.0, 0.9);
+
+    // самые передние ели у краёв
+    for (let i = 0; i < 4; i++) {
+      const left = i % 2 === 0;
+      const x = left ? w * (0.02 + rnd() * 0.12) : w * (0.86 + rnd() * 0.12);
+      const th = h * (0.6 + rnd() * 0.25);
+      drawTree(c, x, h * (0.98 + rnd() * 0.05), th, th * 0.48, '#1d2124', '#cfd4d8', rnd);
+    }
+
+    // снежный покров внизу
+    g = c.createLinearGradient(0, h * 0.86, 0, h);
+    g.addColorStop(0, 'rgba(250,251,252,0)');
+    g.addColorStop(0.35, 'rgba(250,251,252,0.95)');
+    g.addColorStop(1, '#e8ebee');
+    c.fillStyle = g; c.fillRect(0, h * 0.86, w, h * 0.14);
+  }
+
+  function buildMosaic() {
+    const ts = clamp(Math.round(H / 75), 9, 22);
+    const cols = Math.ceil(W / ts), rows = Math.ceil(H / ts);
+    const K = 5;
+
+    const hi = document.createElement('canvas');
+    hi.width = cols * K; hi.height = rows * K;
+    drawScene(hi.getContext('2d'), hi.width, hi.height);
+
+    const lo = document.createElement('canvas');
+    lo.width = cols; lo.height = rows;
+    const lc = lo.getContext('2d', { willReadFrequently: true });
+    lc.imageSmoothingEnabled = true;
+    lc.imageSmoothingQuality = 'high';
+    lc.drawImage(hi, 0, 0, cols, rows);
+    const data = lc.getImageData(0, 0, cols, rows).data;
+
+    bg.width = Math.round(W * DPR); bg.height = Math.round(H * DPR);
+    const c = bgCtx;
+    c.setTransform(DPR, 0, 0, DPR, 0, 0);
+    c.fillStyle = '#9ea5ab';
+    c.fillRect(0, 0, W, H);
+
+    const rnd = mulberry32(99);
+    const levels = 11;
+    const gap = Math.max(1, ts * 0.07);
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const i = (y * cols + x) * 4;
+        let L = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        L = Math.round(L / 255 * levels) / levels * 255;   // палитра ступеней серого
+        L += (rnd() - 0.5) * 9;                            // лёгкая «витражная» вариация
+        const r = clamp(L * 0.955, 0, 255), gC = clamp(L * 0.985, 0, 255), b = clamp(L * 1.03 + 2, 0, 255);
+        c.fillStyle = `rgb(${r | 0},${gC | 0},${b | 0})`;
+        c.fillRect(x * ts + gap / 2, y * ts + gap / 2, ts - gap, ts - gap);
+      }
+    }
+    // мягкая виньетка
+    const vg = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(10,14,18,0.28)');
+    c.fillStyle = vg; c.fillRect(0, 0, W, H);
+  }
+
+  /* ---------- Снегопад ---------- */
+  function makeSprite(size) {
+    const s = document.createElement('canvas');
+    s.width = s.height = size;
+    const c = s.getContext('2d');
+    const r = size / 2;
+    const g = c.createRadialGradient(r, r, 0, r, r, r);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.35, 'rgba(255,255,255,0.95)');
+    g.addColorStop(0.62, 'rgba(235,240,245,0.4)');
+    g.addColorStop(0.8, 'rgba(160,172,184,0.18)');
+    g.addColorStop(1, 'rgba(160,172,184,0)');
+    c.fillStyle = g; c.fillRect(0, 0, size, size);
+    return s;
+  }
+  const sprite = makeSprite(64);
+  const spriteSharp = (() => {
+    const s = document.createElement('canvas'); s.width = s.height = 32;
+    const c = s.getContext('2d');
+    const g = c.createRadialGradient(16, 16, 0, 16, 16, 16);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.95)');
+    g.addColorStop(0.8, 'rgba(180,190,200,0.25)');
+    g.addColorStop(1, 'rgba(180,190,200,0)');
+    c.fillStyle = g; c.fillRect(0, 0, 32, 32);
+    return s;
+  })();
+
+  let flakes = [];
+  const mouse = { x: -9999, y: -9999, vx: 0, vy: 0, nx: 0, active: false };
+  let windSmooth = 0;
+
+  function spawn(layer, initial) {
+    const k = H / 900;
+    const f = { layer, phase: Math.random() * Math.PI * 2 };
+    if (layer === 0) { f.r = 1.2 + Math.random() * 1.4; f.vy = (28 + Math.random() * 22) * k; f.alpha = 0.35 + Math.random() * 0.3; f.amp = 10 + Math.random() * 10; f.freq = 0.5 + Math.random() * 0.5; f.par = 0.3; }
+    if (layer === 1) { f.r = 2.4 + Math.random() * 2.2; f.vy = (62 + Math.random() * 40) * k; f.alpha = 0.7 + Math.random() * 0.25; f.amp = 18 + Math.random() * 16; f.freq = 0.6 + Math.random() * 0.6; f.par = 0.7; }
+    if (layer === 2) { f.r = 6 + Math.random() * 7; f.vy = (125 + Math.random() * 70) * k; f.alpha = 0.7 + Math.random() * 0.3; f.amp = 28 + Math.random() * 30; f.freq = 0.4 + Math.random() * 0.5; f.par = 1.4; }
+    f.x = Math.random() * (W + 200) - 100;
+    f.y = initial ? Math.random() * H : -f.r * 3 - Math.random() * 60;
+    f.vx = 0;
+    return f;
+  }
+
+  function initSnow() {
+    const area = W * H;
+    const n0 = clamp(Math.round(area / 3300), 120, 520);
+    const n1 = clamp(Math.round(area / 7500), 70, 260);
+    const n2 = clamp(Math.round(area / 26000), 18, 80);
+    flakes = [];
+    for (let i = 0; i < n0; i++) flakes.push(spawn(0, true));
+    for (let i = 0; i < n1; i++) flakes.push(spawn(1, true));
+    for (let i = 0; i < n2; i++) flakes.push(spawn(2, true));
+  }
+
+  let last = performance.now(), time = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now; time += dt;
+    snCtx.clearRect(0, 0, W, H);
+
+    // ветер зависит от положения курсора + затухающая скорость мыши
+    const targetWind = mouse.active ? mouse.nx * 40 : 0;
+    windSmooth += (targetWind - windSmooth) * Math.min(1, dt * 2);
+    mouse.vx *= Math.pow(0.02, dt); mouse.vy *= Math.pow(0.02, dt);
+    const baseWind = 14 + Math.sin(time * 0.35) * 10;   // лёгкий порывистый ветер
+
+    const R = 150;
+    for (let i = 0; i < flakes.length; i++) {
+      const p = flakes[i];
+      // реакция на курсор
+      if (mouse.active) {
+        const dx = p.x - mouse.x, dy = p.y - mouse.y, d2 = dx * dx + dy * dy;
+        if (d2 < R * R) {
+          const d = Math.sqrt(d2) || 1, s = (1 - d / R);
+          p.vx += (dx / d) * s * 260 * p.par * dt + mouse.vx * s * 0.9 * p.par * dt * 6;
+          p.vy += (mouse.vy * 0.02) * s * p.par;
+        }
+      }
+      p.vx *= Math.pow(0.15, dt);
+      const sway = Math.cos(time * p.freq + p.phase) * p.amp;
+      p.x += (sway + (baseWind + windSmooth) * p.par) * dt + p.vx * dt;
+      p.y += p.vy * dt;
+
+      if (p.y > H + p.r * 3 || p.x < -150 || p.x > W + 150) {
+        const n = spawn(p.layer, false);
+        n.x = Math.random() * (W + 200) - 100;
+        flakes[i] = n; continue;
+      }
+
+      snCtx.globalAlpha = p.alpha;
+      if (p.layer === 2) {
+        const s = p.r * 3.2; snCtx.drawImage(sprite, p.x - s / 2, p.y - s / 2, s, s);
+      } else if (p.layer === 1) {
+        const s = p.r * 2.6; snCtx.drawImage(spriteSharp, p.x - s / 2, p.y - s / 2, s, s);
+      } else {
+        const s = p.r * 2.4; snCtx.drawImage(spriteSharp, p.x - s / 2, p.y - s / 2, s, s);
+      }
+    }
+    snCtx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- Размер ---------- */
+  function resize() {
+    const sr = document.getElementById('stage').getBoundingClientRect();
+    W = Math.round(sr.width); H = Math.round(sr.height);
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    snow.width = Math.round(W * DPR); snow.height = Math.round(H * DPR);
+    snCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildMosaic();
+    initSnow();
+  }
+  let rt;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(resize, 120); });
+  window.addEventListener('orientationchange', () => { clearTimeout(rt); rt = setTimeout(resize, 250); });
+
+  /* ---------- Мышь / касание ---------- */
+  function moveTo(x, y) {
+    const sr = document.getElementById('stage').getBoundingClientRect();
+    x -= sr.left; y -= sr.top;
+    if (mouse.active) { mouse.vx = (x - mouse.x) * 8; mouse.vy = (y - mouse.y) * 8; }
+    mouse.x = x; mouse.y = y; mouse.nx = (x / W - 0.5) * 2; mouse.active = true;
+  }
+  window.addEventListener('mousemove', e => moveTo(e.clientX, e.clientY));
+  window.addEventListener('touchmove', e => { const t = e.touches[0]; if (t) moveTo(t.clientX, t.clientY); }, { passive: true });
+  window.addEventListener('mouseleave', () => { mouse.active = false; });
+  window.addEventListener('touchend', () => { mouse.active = false; });
+
+  /* ---------- Музыка ---------- */
+  const audio = document.getElementById('bgMusic');
+  const soundBtn = document.getElementById('soundBtn');
+  audio.volume = 0.7;
+  let unlocked = false;
+
+  function syncBtn() { soundBtn.classList.toggle('muted', audio.paused); }
+  audio.addEventListener('play', syncBtn);
+  audio.addEventListener('pause', syncBtn);
+
+  function tryPlay() {
+    const p = audio.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => { unlocked = true; syncBtn(); removeUnlock(); }).catch(() => { syncBtn(); });
+    }
+  }
+  function unlockHandler() { if (!unlocked) tryPlay(); }
+  const unlockEvents = ['pointerdown', 'touchstart', 'click', 'keydown'];
+  function removeUnlock() { unlockEvents.forEach(ev => window.removeEventListener(ev, unlockHandler, true)); }
+  unlockEvents.forEach(ev => window.addEventListener(ev, unlockHandler, true));
+  tryPlay();
+
+  soundBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (audio.paused) { audio.play().then(() => { unlocked = true; removeUnlock(); }).catch(() => {}); }
+    else { audio.pause(); unlocked = true; removeUnlock(); }
+  });
+  soundBtn.addEventListener('pointerdown', e => e.stopPropagation());
+  soundBtn.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+
+  /* ---------- Текст песни ---------- */
+  const lines = [
+    'А снег идёт, а снег идёт',
+    'По щекам мне бьёт, бьёт',
+    'Болею очень, температура',
+    'Стою и жду тебя, как дура',
+    'Снежинки ртом ловила, очень мило',
+    'Клёвый вечер, делать нечё',
+    'Там, где нет тебя'
+  ];
+  const lyricEl = document.getElementById('lyric');
+  let idx = -1, timer = null, swapTimer = null;
+  const HOLD = 3300;
+
+  function show(i) {
+    lyricEl.textContent = lines[i];
+    lyricEl.classList.remove('out');
+    // перезапуск анимации появления
+    lyricEl.classList.remove('in'); void lyricEl.offsetWidth; lyricEl.classList.add('in');
+  }
+  function next(immediate) {
+    clearTimeout(timer); clearTimeout(swapTimer);
+    const go = () => { idx = (idx + 1) % lines.length; show(idx); timer = setTimeout(next, HOLD); };
+    if (idx < 0) { go(); return; }
+    lyricEl.classList.remove('in'); lyricEl.classList.add('out');
+    swapTimer = setTimeout(go, immediate ? 320 : 450);
+  }
+  window.addEventListener('click', e => {
+    if (e.target.closest('#soundBtn')) return;
+    if (!unlocked) tryPlay();
+    next(true);
+  });
+
+  /* ---------- Старт ---------- */
+  resize();
+  requestAnimationFrame(t => { last = t; frame(t); });
+  next();
+})();
+</script>
+</body>
+</html>
